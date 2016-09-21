@@ -1,0 +1,640 @@
+module top( input         clk, reset,
+            output [31:0] writedata, dataadr,
+            output        memwrite,
+				output [31:0] pc,instr);
+ 
+  wire [31:0] readdata;
+
+  // instantiate processor and memories
+
+  mips mips(clk, reset, pc, instr, memwrite, dataadr, writedata, readdata);
+  imem imem(pc[7:2], instr);
+  dmem dmem(clk, memwrite, dataadr, writedata, readdata);
+
+endmodule
+
+
+// External data memory used by MIPS single-cycle processor
+
+module dmem(input         clk, we,
+            input  [31:0] addr, wd,
+            output [31:0] rd);
+
+  reg  [31:0] RAM[63:0];
+
+  assign rd = RAM[addr[31:2]]; // word-aligned read (for lw)
+
+  always @(posedge clk)
+    if (we)
+      RAM[addr[31:2]] <= wd;   // word-aligned write (for sw)
+
+endmodule
+
+
+// External instruction memory used by MIPS single-cycle
+// processor. It models instruction memory as a stored-program 
+// ROM, with address as input, and instruction as output
+
+module imem ( input [5:0] addr,
+    		   output reg [31:0] instr);
+
+	always@(addr)
+	   case ({addr,2'b00})		   // word-aligned fetch
+//		address		instruction
+//		-------		-----------
+		8'h00: instr = 32'h20020005;  // disassemble, by hand 
+		8'h04: instr = 32'h2003000c;  // or with a program,
+		8'h08: instr = 32'h2067fff7;  // to find out what
+		8'h0c: instr = 32'h00e22025;  // this program does!
+		8'h10: instr = 32'h00642824;
+		8'h14: instr = 32'h00a42820;
+		8'h18: instr = 32'h10a7000a;
+		8'h1c: instr = 32'h0064202a;
+		8'h20: instr = 32'h10800001;
+		8'h24: instr = 32'h20050000;
+		8'h28: instr = 32'h00e2202a;
+		8'h2c: instr = 32'h00853820;
+		8'h30: instr = 32'h00e23822;
+		8'h34: instr = 32'hac670044;
+		8'h38: instr = 32'h8c020050;
+		8'h3c: instr = 32'h08000011;
+		8'h40: instr = 32'h20020001;
+		8'h44: instr = 32'hac020054;
+		8'h48: instr = 32'h08000012;	// j 48, so it will loop here
+	     default: instr = {32{1'bx}};	// unknown address
+	   endcase
+endmodule
+
+
+// single-cycle MIPS processor, with controller and datapath
+
+module mips (input         clk, reset,
+             output [31:0] pc,
+             input  [31:0] instr,
+             output        memwrite,
+             output [31:0] aluout, writedata,
+             input  [31:0] readdata);
+
+  wire        memtoreg, pcsrc, zero,
+              alusrc, regdst, regwrite, jump;
+  wire [2:0]  alucontrol;
+
+  controller c (instr[31:26], instr[5:0], zero,
+               memtoreg, memwrite, pcsrc,
+               alusrc, regdst, regwrite, jump,
+               alucontrol);
+  datapath dp (clk, reset, memtoreg, pcsrc,
+              alusrc, regdst, regwrite, jump,
+              alucontrol, zero, pc, instr,
+              aluout, writedata, readdata);
+endmodule
+
+
+module controller(input  [5:0] op, funct,
+                  input        zero,
+                  output       memtoreg, memwrite,
+                  output       pcsrc, alusrc,
+                  output       regdst, regwrite,
+                  output       jump,
+                  output [2:0] alucontrol);
+
+  wire [1:0] aluop;
+  wire       branch;
+
+  maindec md (op, regwrite, regdst, alusrc, branch,
+             memwrite, memtoreg, aluop, jump);
+  aludec  ad (funct, aluop, alucontrol);
+
+  assign pcsrc = branch & zero;
+endmodule
+
+
+module maindec(input  [5:0] op,
+               output       regwrite, regdst,
+               output       alusrc, branch, 
+               output       memwrite, memtoreg,
+               output [1:0] aluop, 
+               output       jump);
+
+  reg [8:0] controls;
+
+  assign {regwrite, regdst, alusrc, branch, 
+          memwrite, memtoreg, aluop, jump} = controls;
+	
+
+  always @(*)
+    case(op)
+      6'b000000: controls <= 9'b110000100; // R-type
+      6'b100011: controls <= 9'b101001000; // LW
+      6'b101011: controls <= 9'b001010000; // SW
+      6'b000100: controls <= 9'b000100010; // BEQ
+      6'b001000: controls <= 9'b101000000; // ADDI
+      6'b000010: controls <= 9'b000000001; // J
+      default:   controls <= 9'bxxxxxxxxx; // ???
+    endcase
+	 
+endmodule
+
+module aludec(input      [5:0] funct,
+              input      [1:0] aluop,
+              output reg [2:0] alucontrol);
+
+  always @(*)
+    case(aluop)
+      2'b00: alucontrol <= 3'b010;  // add
+      2'b01: alucontrol <= 3'b110;  // sub
+      default: case(funct)          // RTYPE
+          6'b100000: alucontrol <= 3'b010; // ADD
+          6'b100010: alucontrol <= 3'b110; // SUB
+          6'b100100: alucontrol <= 3'b000; // AND
+          6'b100101: alucontrol <= 3'b001; // OR
+          6'b101010: alucontrol <= 3'b111; // SLT
+          default:   alucontrol <= 3'bxxx; // ???
+        endcase
+    endcase
+endmodule
+
+module datapath(input         clk, reset,
+                input         memtoreg, pcsrc,
+                input         alusrc, regdst,
+                input         regwrite, jump,
+                input  [2:0]  alucontrol,
+                output        zero,
+                output [31:0] pc,
+                input  [31:0] instr,
+                output [31:0] aluout, writedata,
+                input  [31:0] readdata);
+
+  wire [4:0]  writereg;
+  wire [31:0] pcnext, pcnextbr, pcplus4, pcbranch;
+  wire [31:0] signimm, signimmsh;
+  wire [31:0] srca, srcb;
+  wire [31:0] result;
+
+  // next PC logic
+  flopr #(32) pcreg(clk, reset, pcnext, pc);
+  adder       pcadd1(pc, 32'b100, pcplus4);
+  sl2         immsh(signimm, signimmsh);
+  adder       pcadd2(pcplus4, signimmsh, pcbranch);
+  mux2 #(32)  branchmux(pcplus4, pcbranch, pcsrc,
+                      pcnextbr);
+  mux2 #(32)  jumpmux(pcnextbr, {pcplus4[31:28], 
+                    instr[25:0], 2'b00}, 
+                    jump, pcnext);
+
+  // register file logic
+  regfile     rf(clk, regwrite, instr[25:21],
+                 instr[20:16], writereg,
+                 result, srca, writedata);
+  mux2 #(5)   w_addrmux(instr[20:16], instr[15:11],
+                    regdst, writereg);
+  mux2 #(32)  w_datamux(aluout, readdata,
+                     memtoreg, result);
+  signext     se(instr[15:0], signimm);
+
+  // ALU logic
+  mux2 #(32)  srcbmux(writedata, signimm, alusrc,
+                      srcb);
+  alu         alu(srca, srcb, alucontrol,
+                  aluout, zero);
+endmodule
+
+
+// 3-ported register file, w/ register 0 hardwired to 0
+// 2 read ports (combinational), 1 write port (clocked)
+
+module regfile(input         clk, 
+               input         we3, 
+               input  [4:0]  ra1, ra2, wa3, 
+               input  [31:0] wd3, 
+               output [31:0] rd1, rd2);
+
+  reg [31:0] rf[31:0];
+
+  always @(posedge clk)
+    if (we3) rf[wa3] <= wd3;	
+
+  assign rd1 = (ra1 != 0) ? rf[ra1] : 0;
+  assign rd2 = (ra2 != 0) ? rf[ra2] : 0;
+endmodule
+
+module alu(input      [31:0] a, b, 
+           input      [2:0]  alucont, 
+           output reg [31:0] result,
+           output reg    zero);
+      
+always@(a or b or alucont)
+
+case(alucont)
+  3'b010: result = a + b;
+  3'b110: result = a - b;
+  3'b000: result = a & b;
+  3'b001: result = a | b;
+  3'b111: 
+    begin
+    result = a - b;
+    if(result == 0)
+		zero = 1'b1;
+		end
+
+endcase 
+endmodule
+
+
+module adder(input [31:0] a, b,
+             output [31:0] y);
+
+  assign y = a + b;
+endmodule
+
+module sl2(input  [31:0] a,
+           output [31:0] y);
+
+  assign y = {a[29:0], 2'b00};	// shifts left by 2
+endmodule
+
+module signext(input  [15:0] a,
+               output [31:0] y);
+              
+  assign y = {{16{a[15]}}, a};	// sign-extends 16-bit a
+endmodule
+
+
+// parameterized register 
+module flopr #(parameter WIDTH = 8)
+              (input                  clk, reset,
+               input      [WIDTH-1:0] d, 
+               output reg [WIDTH-1:0] q);
+
+  always @(posedge clk, posedge reset)
+    if (reset) q <= 0;
+    else       q <= d;
+endmodule
+
+// parameterized register with enable
+module flopenr #(parameter WIDTH = 8)
+                (input                  clk, reset,
+                 input                  en,
+                 input      [WIDTH-1:0] d, 
+                 output reg [WIDTH-1:0] q);
+ 
+  always @(posedge clk, posedge reset)
+    if      (reset) q <= 0;
+    else if (en)    q <= d;
+endmodule
+
+// paramaterized 2-to-1 MUX
+module mux2 #(parameter WIDTH = 8)
+             (input  [WIDTH-1:0] d0, d1, 
+              input              s, 
+              output [WIDTH-1:0] y);
+
+  assign y = s ? d1 : d0; 
+endmodule
+
+
+
+module MIPS_lite_tb;
+
+  // Inputs
+  reg clk;
+  reg reset;
+
+  // Outputs
+  wire [31:0] writedata;
+  wire [31:0] dataadr;
+  wire [31:0] pc,instr;
+  wire memwrite;
+
+  // Instantiate the Unit Under Test (UUT)
+  top dut(clk,reset,writedata,dataadr,memwrite,pc,instr);
+  
+  //initialize test
+  initial 
+  begin
+    reset <= 1;
+    #22;
+    reset <= 0;
+  end
+  //generate clock to sequence tests
+  always
+    begin
+    clk <= 1;
+    #5;
+    clk <= 0;
+    #5;
+    end
+  //check results
+    always@(negedge clk)
+      begin
+        if(memwrite)
+          begin
+            if(dataadr === 84 & writedata === 7 )
+              begin
+              $display("Simulation succeeded");
+              $stop;
+              end
+            else if(dataadr !== 80)
+              begin
+              $display("Simulation failed");
+              $stop;
+              end
+            end
+        end
+    
+      
+endmodule
+
+
+
+New or changed modules:
+
+module MAIN(input clk,reset,sw_input1,
+        input [1:4]enables,
+        output [7:0] writedata,dataadr,
+        output clk_pulse1,
+        output [0:3]AN,
+        output [6:0]C,
+        output DP,memwrite);
+        
+pulse_controller one(clk, sw_input1, reset,clk_pulse1);
+
+  
+display_controller display(clk, reset,enables, writedata[7:4], writedata[3:0], dataadr[7:4], dataadr[3:0],AN[0:3],C[6:0],DP);
+
+top topone(clk_pulse1, reset, writedata,dataadr,memwrite);
+
+endmodule
+
+module pulse_controller(
+  input CLK, sw_input, clear,
+  output reg clk_pulse );
+
+   reg [2:0] state, nextstate;
+   reg [20:0] CNT; 
+   wire cnt_zero; 
+
+  always @ (posedge CLK, posedge clear)
+     if(clear)
+        state <=3'b000;
+     else
+        state <= nextstate;
+
+  always @ (sw_input, state, cnt_zero)
+          case (state)
+             3'b000: begin if (sw_input) nextstate = 3'b001; 
+                           else nextstate = 3'b000; clk_pulse = 0; end       
+             3'b001: begin nextstate = 3'b010; clk_pulse = 1; end
+             3'b010: begin if (cnt_zero) nextstate = 3'b011; 
+                           else nextstate = 3'b010; clk_pulse = 0; end
+             3'b011: begin if (sw_input) nextstate = 3'b011; 
+                           else nextstate = 3'b100; clk_pulse = 0; end
+             3'b100: begin if (cnt_zero) nextstate = 3'b000; 
+                           else nextstate = 3'b100; clk_pulse = 0; end
+            default: begin nextstate = 3'b000; clk_pulse = 0; end
+          endcase
+
+  always @(posedge CLK)
+     case(state)
+    3'b001: CNT <= 2000000;
+    3'b010: CNT <= CNT-1;
+    3'b011: CNT <= 2000000;
+    3'b100: CNT <= CNT-1;
+     endcase
+
+//  reduction operator |CNT gives the OR of all bits in the CNT register  
+  assign cnt_zero = ~|CNT;
+
+endmodule
+
+
+module display_controller (
+    input clk, clear,
+    input [1:4] enables, 
+    input [3:0] digit4, digit3, digit2, digit1,
+    output [0:3] AN,
+    output [6:0] C,
+    output       DP
+    );
+
+    reg [3:0] current_digit, cur_dig_AN;
+    reg [6:0] segments;
+    
+      assign AN = ~(enables & cur_dig_AN);// AN signals are active low,
+                                // and must be enabled to display digit
+      assign C = ~segments;     // since the CA values are active low
+      assign DP = 1;            // the dot point is always off 
+                                // (0 = on, since it is active low)
+
+// the 18-bit counter, runs at 50 MHz, so bit16 changes each 1.3 millisecond
+     localparam N=18;
+     reg [N-1:0] count;
+  always @(posedge clk, posedge clear)
+    if(clear) count <= 0;
+    else count <= count + 1;  
+
+// the upper-2 bits of count cycle through the digits and the AN patterns     
+  always @ (count[N-1:N-2], digit1, digit2, digit3, digit4)
+     case (count[N-1:N-2])
+                // left most, AN1  
+    2'b00: begin current_digit = digit4; cur_dig_AN = 4'b0001; end  
+    2'b01: begin current_digit = digit3; cur_dig_AN = 4'b0010; end
+    2'b10: begin current_digit = digit2; cur_dig_AN = 4'b0100; end
+    2'b11: begin current_digit = digit1; cur_dig_AN = 4'b1000; end
+                // right most, AN4
+    default: begin current_digit = 4'bxxxx; cur_dig_AN = 4'bxxxx; end
+     endcase
+
+// the hex-to-7-segment decoder
+  always @ (current_digit)
+    case (current_digit)
+    4'b0000: segments = 7'b111_1110;  // 0
+    4'b0001: segments = 7'b011_0000;  // 1
+    4'b0010: segments = 7'b110_1101;  // 2
+    4'b0011: segments = 7'b111_1001;  // 3
+    4'b0100: segments = 7'b011_0011;  // 4
+    4'b0101: segments = 7'b101_1011;  // 5
+    4'b0110: segments = 7'b101_1111;  // 6
+    4'b0111: segments = 7'b111_0000;  // 7
+    4'b1000: segments = 7'b111_1111;  // 8
+    4'b1001: segments = 7'b111_0011;  // 9
+    4'b1010: segments = 7'b111_0111;  // A
+    4'b1011: segments = 7'b001_1111;  // b
+    4'b1100: segments = 7'b000_1101;  // c
+    4'b1101: segments = 7'b011_1101;  // d
+    4'b1110: segments = 7'b100_1111;  // E
+    4'b1111: segments = 7'b100_0111;  // F
+    default: segments = 7'bxxx_xxxx;
+    endcase   
+endmodule
+
+
+module mips (input         clk, reset,
+             output [31:0] pc,
+             input  [31:0] instr,
+             output        memwrite,
+             output [31:0] aluout, writedata,
+             input  [31:0] readdata);
+
+  wire        memtoreg, pcsrc, zero,
+              alusrc, regdst, regwrite, jump;
+  wire [2:0]  alucontrol;
+
+  controller c (instr[31:26], instr[5:0], zero,
+               memtoreg, memwrite, pcsrc,
+               alusrc,regwrite, jump,pc_cont,
+               write_cont, regdst, alucontrol);
+  
+  datapath dp (clk, reset, memtoreg, pcsrc,
+              alusrc,regwrite, jump, pc_cont,
+              alucontrol, regdst, write_cont,zero, pc, instr,
+              aluout, writedata, readdata);
+endmodule
+
+module controller ( input  [5:0] op, funct,
+                    input          zero,
+                    output       memtoreg, memwrite,
+                    output       pcsrc, alusrc,
+                    output       regwrite,
+                    output       jump,
+                    output       pc_cont,
+                    output [1:0] write_cont,regdst,
+                    output [2:0] alucontrol);
+
+   wire [1:0] aluop;
+   wire        branch;
+
+   maindec md (op, regwrite, regdst, alusrc, branch, memwrite,  memtoreg,
+     aluop, jump,pc_cont,write_cont);
+
+   aludec  ad (funct, aluop, alucontrol);
+
+   assign pcsrc = branch & zero;
+
+endmodule
+
+
+module maindec (input  [5:0] op, 
+                output regwrite, alusrc, branch,
+                output memwrite, memtoreg, output pc_cont, 
+                output [1:0]write_cont,aluop,regdst,
+                output jump);
+   
+   reg [8:0] controls;
+
+   assign {regwrite, regdst, alusrc, branch, memwrite,
+                memtoreg,  aluop, jump,write_cont,pc_cont} = controls;
+
+  always @(*)
+    case(op)
+      6'b000000: controls  = 13'b1010000100000; //Rtype
+      6'b100011: controls  = 13'b1001001000000; //LW
+      6'b101011: controls  = 13'b0001010000000; //SW
+      6'b000100: controls  = 13'b0000100010000; //BEQ
+      6'b001000: controls  = 13'b1001000000000; //ADDI
+      6'b000010: controls  = 13'b0000000001000; //J
+      6'b010101: controls  = 13'b1001001000011; //jalm
+      6'b010110: controls  = 13'b0000000000000; //nop
+      6'b010111: controls  = 13'b1000000000100; //lui
+      6'b011111: controls  = 13'b1101010000110; //sw+
+      default:       controls  = 13'bxxxxxxxxx;    //???
+    endcase
+endmodule
+
+
+
+module datapath(input clk, reset,
+                input memtoreg, pcsrc,
+                input alusrc,
+                input regwrite, jump,
+       input pc_cont,
+       input  [2:0]  alucontrol,
+       input [1:0] regdst,
+       input [1:0] write_cont,
+                output        zero,
+                output [31:0] pc,
+                input  [31:0] instr,
+                output [31:0] aluout, writedata,
+                input  [31:0] readdata);
+wire [4:0]  writereg;
+wire [31:0] pcnext, pcnextbr, pcplus4, pcbranch,pc_zero,pc_one;
+wire [31:0] signimm, signimmsh;
+wire [31:0] zeroext,zeroextsh;
+wire [31:0] srca, srcb;
+wire [31:0] result;
+wire [31:0] newdatawrite;
+wire [31:0] rplus4;
+
+//result logic
+
+// next PC logic
+flopr #(32) pcreg(clk, reset, pcnext, pc);
+adder pcadd1(pc, 32'b100, pcplus4);
+sl2 immsh(signimm, signimmsh);
+adder pcadd2(pcplus4, signimmsh, pcbranch);
+mux2 #(32)  branchmux(pcplus4, pcbranch, pcsrc, pcnextbr);
+mux2 #(32)  jalmmux  (pcnextbr,result,pc_cont,pc_zero);
+mux2 #(32)  jumpmux(pc_zero, {pcplus4[31:28],
+                  instr[25:0], 2'b00},
+                  jump, pcnext); 
+
+// register file logic
+regfile     rf(clk, regwrite, instr[25:21],
+               instr[20:16], writereg,
+               newdatawrite, srca, writedata);
+adder regplus4(instr[25:21], 32'b100 ,rplus4);
+mux3 #(5)   w_addrmux(instr[20:16], instr[15:11],instr[25:21],
+                  regdst, writereg);
+mux4 #(32)  w_datamux(result,pcplus4,zeroextsh,rplus4,write_cont[1:0],newdatawrite);
+mux2 #(32)  w_finaldata(aluout, readdata,
+                   memtoreg, result);
+signext     se(instr[15:0], signimm);
+zeroext     ze(instr[15:0],zeroext);
+sl16        sl(zeroext,zeroextsh);
+
+// ALU logic
+mux2 #(32)  srcbmux(writedata, signimm, alusrc,
+                    srcb);
+alu         alu(srca, srcb, alucontrol,aluout,zero);
+
+endmodule
+
+
+module sl16(input [31:0] a, output [31:0] b);
+  assign b = a << 4;
+  endmodule
+
+
+
+module zeroext(input [15:0] a, output [31:0] b);
+  assign b = {{16{1'b0}},a};
+  endmodule
+
+
+module mux3 #(parameter WIDTH = 32)
+         (input [WIDTH - 1:0] d0,d1,d2,
+          input [1:0]sel,
+          output reg[WIDTH - 1:0] y);
+        always @(d0 or d1 or d2 or sel)
+  case(sel)
+    2'b00: y = d0;
+    2'b01: y = d1;
+    2'b10: y = d2;
+  endcase
+  endmodule
+
+
+
+module mux4 #(parameter WIDTH = 32)
+         (input [WIDTH - 1:0] d0,d1,d2,d3,
+          input [1:0]sel,
+          output reg [WIDTH - 1:0] y);
+        always @(d0 or d1 or d2 or sel)
+  case(sel)
+    2'b00: y = d0;
+    2'b01: y = d1;
+    2'b10: y = d2;
+    2'b11: y = d3;
+  endcase
+  endmodule
+
